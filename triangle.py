@@ -18,16 +18,17 @@ __contributors__ = [
     "Phil Marshall @drphilmarshall",
     "Pierre Gratier @pirg",
 ]
-
+import ipdb
 import numpy as np
 import matplotlib.pyplot as pl
 from matplotlib.ticker import MaxNLocator
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Ellipse
 import matplotlib.cm as cm
+from scipy.interpolate import griddata
+import scipy.ndimage as sci
 
-
-def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
+def corner(xs, smooth=9.,labels=None, show_titles=False, title_fmt=".2f",
            title_args=None, extents=None, truths=None, truth_color="#4682b4",
            scale_hist=False, quantiles=None, verbose=True,
            plot_contours=True, plot_datapoints=True, fig=None, **kwargs):
@@ -38,15 +39,9 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
 
     Parameters
     ----------
-    xs : array_like (nsamples, ndim)
-        The samples. This should be a 1- or 2-dimensional array. For a 1-D
-        array this results in a simple histogram. For a 2-D array, the zeroth
-        axis is the list of samples and the next axis are the dimensions of
-        the space.
+    xs : array_like ([prob, likelyhood, nsamples], ndim)
+        The output from pymultinest. pymultinest.analyse.Analyzer.get_data
 
-    weights : array_like (nsamples,)
-        The weight of each sample. If `None` (default), samples are given
-        equal weight.
 
     labels : iterable (ndim,) (optional)
         A list of names for the dimensions.
@@ -112,17 +107,10 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
     assert xs.shape[0] <= xs.shape[1], "I don't believe that you want more " \
                                        "dimensions than samples!"
 
-    if weights is not None:
-        weights = np.asarray(weights)
-        if weights.ndim != 1:
-            raise ValueError('weights must be 1-D')
-        if xs.shape[1] != weights.shape[0]:
-            raise ValueError('lengths of weights must match number of samples')
-
     # backwards-compatibility
     plot_contours = kwargs.get("smooth", plot_contours)
 
-    K = len(xs)
+    K = xs.shape[0] - 2 
     factor = 2.0           # size of one side of one panel
     lbdim = 0.5 * factor   # size of left/bottom margin
     trdim = 0.2 * factor   # size of top/right margin
@@ -144,7 +132,8 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
                         wspace=whspace, hspace=whspace)
 
     if extents is None:
-        extents = [[x.min(), x.max()] for x in xs]
+        # transpose to get each varible
+        extents = [[x.min(), x.max()] for x in xs[2:, :]]
 
         # Check for parameters that never change.
         m = np.array([e[0] == e[1] for e in extents], dtype=bool)
@@ -161,23 +150,30 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
                 emin, emax = extents[i]
             except TypeError:
                 q = [0.5 - 0.5*extents[i], 0.5 + 0.5*extents[i]]
-                extents[i] = quantile(xs[i], q, weights=weights)
-
-    for i, x in enumerate(xs):
+                extents[i] = quantile(xs[i], q)
+    # plot digaonals
+    for dim in range(len((xs[2:,:]))):
         if np.shape(xs)[0] == 1:
             ax = axes
         else:
-            ax = axes[i, i]
-        # Plot the histograms.
-        n, b, p = ax.hist(x, weights=weights, bins=kwargs.get("bins", 50),
-                          range=extents[i], histtype="step",
-                          color=kwargs.get("color", "k"))
+            ax = axes[dim, dim]
+        # make marginals and smooth
+        marg = list(zip(xs[0, :], xs[2+dim, :]))
+        marg.sort(key=lambda x: x[1])
+        marg = np.asarray(marg)
+        ax.plot(marg[:,1], sci.gaussian_filter(marg[:,0], smooth),linewidth=5)
+        # set prob marginals extents
+        ax.set_ylim((marg[:,0].min(), marg[:,0].max()))
+        # set axis for to left marginal
+        if not dim == 0:
+            ax.set_yticklabels([])
+
         if truths is not None:
-            ax.axvline(truths[i], color=truth_color)
+            ax.axvline(truths[dim], color=truth_color)
 
         # Plot quantiles if wanted.
         if len(quantiles) > 0:
-            qvalues = quantile(x, quantiles, weights=weights)
+            qvalues = quantile(marg[:,1], quantiles)
             for q in qvalues:
                 ax.axvline(q, ls="dashed", color=kwargs.get("color", "k"))
 
@@ -188,8 +184,7 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
             if show_titles:
                 # Compute the quantiles for the title. This might redo
                 # unneeded computation but who cares.
-                q_16, q_50, q_84 = quantile(x, [0.16, 0.5, 0.84],
-                                            weights=weights)
+                q_16, q_50, q_84 = quantile(x, [0.16, 0.5, 0.84])
                 q_m, q_p = q_50-q_16, q_84-q_50
 
                 # Format the quantile display.
@@ -205,17 +200,12 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
                 ax.set_title(title, **title_args)
 
         # Set up the axes.
-        ax.set_xlim(extents[i])
-        if scale_hist:
-            maxn = np.max(n)
-            ax.set_ylim(-0.1 * maxn, 1.1 * maxn)
-        else:
-            ax.set_ylim(0, 1.1 * np.max(n))
-        ax.set_yticklabels([])
+        ax.set_xlim(extents[dim])
+        
         ax.xaxis.set_major_locator(MaxNLocator(5))
 
         # Not so DRY.
-        if i < K - 1:
+        if dim < K - 1:
             ax.set_xticklabels([])
         else:
             [l.set_rotation(45) for l in ax.get_xticklabels()]
@@ -223,32 +213,39 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
                 ax.set_xlabel(labels[i])
                 ax.xaxis.set_label_coords(0.5, -0.3)
 
-        for j, y in enumerate(xs):
+        for j, y in enumerate(xs[2:,:]):
             if np.shape(xs)[0] == 1:
                 ax = axes
             else:
-                ax = axes[i, j]
-            if j > i:
+                ax = axes[dim, j]
+            if j > dim:
                 ax.set_visible(False)
                 ax.set_frame_on(False)
                 continue
-            elif j == i:
+            elif j == dim:
                 continue
-
-            hist2d(y, x, ax=ax, extent=[extents[j], extents[i]],
-                   plot_contours=plot_contours,
-                   plot_datapoints=plot_datapoints,
-                   weights=weights, **kwargs)
+            marg = list(zip(xs[0,:], xs[2+dim, :], xs[2+j, :]))
+            marg.sort(key=lambda x: x[0])
+            marg = np.asarray(marg)
+            
+            # grid data for contour using interoplation
+            x, y = np.meshgrid(np.linspace(marg[:,1].min(), marg[:,1].max(), 100),
+                                            np.linspace(marg[:,2].min(), marg[:,2].max(), 100))
+            z = griddata(marg[:,1:], np.cumsum(marg[:, 0]), (x, y))
+            z[np.isnan(z)] = 0.
+            
+            ax.pcolor(x, y, 1 - sci.filters.gaussian_filter(z,1), vmin=.16, vmax=.85,cmap=cm.hot)
+            ax.contour(x,y,z, levels=[.16, .5, .84], linewidths=[2,2,2],cmap=cm.jet)
 
             if truths is not None:
-                ax.plot(truths[j], truths[i], "s", color=truth_color)
+                ax.plot(truths[j], truths[dim], "s", linewidths=4, color=truth_color)
                 ax.axvline(truths[j], color=truth_color)
-                ax.axhline(truths[i], color=truth_color)
+                ax.axhline(truths[dim], color=truth_color)
 
             ax.xaxis.set_major_locator(MaxNLocator(5))
             ax.yaxis.set_major_locator(MaxNLocator(5))
 
-            if i < K - 1:
+            if dim < K - 1:
                 ax.set_xticklabels([])
             else:
                 [l.set_rotation(45) for l in ax.get_xticklabels()]
@@ -261,7 +258,7 @@ def corner(xs, weights=None, labels=None, show_titles=False, title_fmt=".2f",
             else:
                 [l.set_rotation(45) for l in ax.get_yticklabels()]
                 if labels is not None:
-                    ax.set_ylabel(labels[i])
+                    ax.set_ylabel(labels[dim])
                     ax.yaxis.set_label_coords(-0.3, 0.5)
 
     return fig
